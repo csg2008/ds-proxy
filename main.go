@@ -5,18 +5,22 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
 var (
 	targetURL *url.URL
 	debug     bool
+	forceToken string
+	forceModel string
 )
 
 func main() {
@@ -26,6 +30,8 @@ func main() {
 	flag.StringVar(&host, "host", getEnv("HOST", "127.0.0.1"), "监听的主体地址")
 	var upstream string
 	flag.StringVar(&upstream, "upstream", getEnv("DEEPSEEK_HOST", "https://api.deepseek.com"), "上游模型接口地址")
+	flag.StringVar(&forceToken, "forceToken", "", "强制使用指定的token")
+	flag.StringVar(&forceModel, "forceModel", "", "强制使用指定的模型")
 	flag.BoolVar(&debug, "debug", false, "调试开关")
 	flag.Parse()
 
@@ -77,7 +83,12 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[Parse Warning] %v, forwarding original body", err)
 			bodyMap = nil
 		} else {
-			sanitizeMessages(bodyMap)
+			var source string
+			var apiKey = r.Header.Get("X-Api-Key")
+			if forceToken != "" && apiKey != "" && !strings.HasPrefix(apiKey, "sk-") {
+				source = apiKey
+			}
+			sanitizeMessages(bodyMap, source, forceModel)
 		}
 	}
 
@@ -113,6 +124,9 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Copy headers from original request
 	copyHeaders(outReq.Header, r.Header)
+	if forceToken != "" {
+		outReq.Header.Set("X-Api-Key", forceToken)
+	}
 	outReq.Header.Set("Content-Length", strconv.Itoa(len(forwardBody)))
 	outReq.Host = targetURL.Host
 
@@ -183,7 +197,7 @@ func writeError(w http.ResponseWriter, code int, message string) {
 // DeepSeek requires that assistant messages in thinking mode contain a
 // content block with type="thinking". Claude Code drops this field
 // when saving conversation history, so we inject an empty one if missing.
-func sanitizeMessages(body map[string]interface{}) {
+func sanitizeMessages(body map[string]interface{}, source string, model string) {
 	messagesRaw, ok := body["messages"]
 	if !ok {
 		return
@@ -192,6 +206,22 @@ func sanitizeMessages(body map[string]interface{}) {
 	messages, ok := messagesRaw.([]interface{})
 	if !ok {
 		return
+	}
+
+	if model != "" {
+		body["model"] = model
+	}
+    fmt.Printf("model: %s\n", model)
+	// Add user_id to metadata
+	if source != "" {
+		metadata, ok := body["metadata"].(map[string]interface{})
+		if !ok {
+			body["metadata"] = map[string]interface{}{
+				"user_id": source,
+			}
+		} else {
+			metadata["user_id"] = source
+		}
 	}
 
 	for _, msgRaw := range messages {
